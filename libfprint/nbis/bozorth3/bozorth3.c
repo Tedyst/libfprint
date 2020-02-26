@@ -1,51 +1,43 @@
-/****************************************************************************** 
-
-This file is part of the Export Control subset of the United States NIST
-Biometric Image Software (NBIS) distribution:
-    http://fingerprint.nist.gov/NBIS/index.html
-
-It is our understanding that this falls within ECCN 3D980, which covers
-software associated with the development, production or use of certain
-equipment controlled in accordance with U.S. concerns about crime control
-practices in specific countries.
-
-Therefore, this file should not be exported, or made available on fileservers,
-except as allowed by U.S. export control laws.
-
-Do not remove this notice.
-
-******************************************************************************/
-
-/* NOTE: Despite the above notice (which I have not removed), this file is
- * being legally distributed within libfprint; the U.S. Export Administration
- * Regulations do not place export restrictions upon distribution of
- * "publicly available technology and software", as stated in EAR section
- * 734.3(b)(3)(i). libfprint qualifies as publicly available technology as per
- * the definition in section 734.7(a)(1).
- *
- * For further information, see http://reactivated.net/fprint/US_export_control
- */
-
 /*******************************************************************************
 
-License: 
-This software was developed at the National Institute of Standards and 
-Technology (NIST) by employees of the Federal Government in the course 
-of their official duties. Pursuant to title 17 Section 105 of the 
-United States Code, this software is not subject to copyright protection 
-and is in the public domain. NIST assumes no responsibility  whatsoever for 
-its use by other parties, and makes no guarantees, expressed or implied, 
-about its quality, reliability, or any other characteristic. 
+License:
+This software and/or related materials was developed at the National Institute
+of Standards and Technology (NIST) by employees of the Federal Government
+in the course of their official duties. Pursuant to title 17 Section 105
+of the United States Code, this software is not subject to copyright
+protection and is in the public domain.
 
-Disclaimer: 
-This software was developed to promote biometric standards and biometric
-technology testing for the Federal Government in accordance with the USA
-PATRIOT Act and the Enhanced Border Security and Visa Entry Reform Act.
-Specific hardware and software products identified in this software were used
-in order to perform the software development.  In no case does such
-identification imply recommendation or endorsement by the National Institute
-of Standards and Technology, nor does it imply that the products and equipment
-identified are necessarily the best available for the purpose.  
+This software and/or related materials have been determined to be not subject
+to the EAR (see Part 734.3 of the EAR for exact details) because it is
+a publicly available technology and software, and is freely distributed
+to any interested party with no licensing requirements.  Therefore, it is
+permissible to distribute this software as a free download from the internet.
+
+Disclaimer:
+This software and/or related materials was developed to promote biometric
+standards and biometric technology testing for the Federal Government
+in accordance with the USA PATRIOT Act and the Enhanced Border Security
+and Visa Entry Reform Act. Specific hardware and software products identified
+in this software were used in order to perform the software development.
+In no case does such identification imply recommendation or endorsement
+by the National Institute of Standards and Technology, nor does it imply that
+the products and equipment identified are necessarily the best available
+for the purpose.
+
+This software and/or related materials are provided "AS-IS" without warranty
+of any kind including NO WARRANTY OF PERFORMANCE, MERCHANTABILITY,
+NO WARRANTY OF NON-INFRINGEMENT OF ANY 3RD PARTY INTELLECTUAL PROPERTY
+or FITNESS FOR A PARTICULAR PURPOSE or for any purpose whatsoever, for the
+licensed product, however used. In no event shall NIST be liable for any
+damages and/or costs, including but not limited to incidental or consequential
+damages of any kind, including economic damage or injury to property and lost
+profits, regardless of whether NIST shall be advised, have reason to know,
+or in fact shall know of the possibility.
+
+By using this software, you agree to bear all risk relating to quality,
+use and performance of the software and/or related materials.  You agree
+to hold the Government harmless from any claim arising from your use
+of the software.
 
 *******************************************************************************/
 
@@ -88,9 +80,6 @@ identified are necessarily the best available for the purpose.
 
 #include <stdio.h>
 #include <bozorth.h>
-
-static const int verbose_bozorth = 0;
-static const int m1_xyt = 0;
 
 /***********************************************************************/
 void bz_comp(
@@ -160,7 +149,7 @@ for ( k = 0; k < npoints - 1; k++ ) {
 		else {
 			double dz;
 
-			if ( m1_xyt )
+			if ( 0 )
 				dz = ( 180.0F / PI_SINGLE ) * atanf( (float) -dy / (float) dx );
 			else
 				dz = ( 180.0F / PI_SINGLE ) * atanf( (float) dy / (float) dx );
@@ -261,7 +250,7 @@ for ( k = 0; k < npoints - 1; k++ ) {
 
 		if ( table_index == 19999 ) {
 #ifndef NOVERBOSE
-			if ( verbose_bozorth )
+			if ( 0 )
 				printf( "bz_comp(): breaking loop to avoid table overflow\n" );
 #endif
 			goto COMP_END;
@@ -392,11 +381,12 @@ static int * rtp[ ROT_SIZE_1 ];
 /* extern int * scolpt[ SCOLPT_SIZE ];			 INPUT */
 /* extern int * fcolpt[ FCOLPT_SIZE ];			 INPUT */
 /* extern int   colp[ COLP_SIZE_1 ][ COLP_SIZE_2 ];	 OUTPUT */
-/* extern int verbose_bozorth; */
+/* extern int 0; */
 /* extern FILE * stderr; */
 /* extern char * get_progname( void ); */
 /* extern char * get_probe_filename( void ); */
 /* extern char * get_gallery_filename( void ); */
+
 
 
 
@@ -570,7 +560,7 @@ for ( k = 1; k < probe_ptrlist_len; k++ ) {
 
 		if ( edge_pair_index == 19999 ) {
 #ifndef NOVERBOSE
-			if ( verbose_bozorth )
+			if ( 0 )
 				fprintf( stderr, "%s: bz_match(): WARNING: list is full, breaking loop early [p=%s; g=%s]\n",
 							get_progname(), get_probe_filename(), get_gallery_filename() );
 #endif
@@ -652,13 +642,13 @@ int avv[ AVV_SIZE_1 ][ AVV_SIZE_2 ];
 if ( pstruct->nrows < MIN_COMPUTABLE_BOZORTH_MINUTIAE ) {
 #ifndef NOVERBOSE
 	if ( gstruct->nrows < MIN_COMPUTABLE_BOZORTH_MINUTIAE ) {
-		if ( verbose_bozorth )
+		if ( 0 )
 			fprintf( stderr, "%s: bz_match_score(): both probe and gallery file have too few minutiae (%d,%d) to compute a real Bozorth match score; min. is %d [p=%s; g=%s]\n",
 						get_progname(),
 						pstruct->nrows, gstruct->nrows, MIN_COMPUTABLE_BOZORTH_MINUTIAE,
 						get_probe_filename(), get_gallery_filename() );
 	} else {
-		if ( verbose_bozorth )
+		if ( 0 )
 			fprintf( stderr, "%s: bz_match_score(): probe file has too few minutiae (%d) to compute a real Bozorth match score; min. is %d [p=%s; g=%s]\n",
 						get_progname(),
 						pstruct->nrows, MIN_COMPUTABLE_BOZORTH_MINUTIAE,
@@ -672,7 +662,7 @@ if ( pstruct->nrows < MIN_COMPUTABLE_BOZORTH_MINUTIAE ) {
 
 if ( gstruct->nrows < MIN_COMPUTABLE_BOZORTH_MINUTIAE ) {
 #ifndef NOVERBOSE
-	if ( verbose_bozorth )
+	if ( 0 )
 		fprintf( stderr, "%s: bz_match_score(): gallery file has too few minutiae (%d) to compute a real Bozorth match score; min. is %d [p=%s; g=%s]\n",
 						get_progname(),
 						gstruct->nrows, MIN_COMPUTABLE_BOZORTH_MINUTIAE,
@@ -711,7 +701,6 @@ tp  = 0;
 p1  = 0;
 tot = 0;
 ftt = 0;
-kx  = 0;
 match_score = 0;
 
 for ( k = 0; k < np - 1; k++ ) {
@@ -765,7 +754,7 @@ for ( k = 0; k < np - 1; k++ ) {
 			}
 
 #ifndef NOVERBOSE
-			if ( verbose_bozorth )
+			if ( 0 )
 				printf( "x1 %d %d %d %d %d %d\n", kx, colp[kx][0], colp[kx][1], colp[kx][2], colp[kx][3], colp[kx][4] );
 #endif
 
@@ -827,7 +816,6 @@ for ( k = 0; k < np - 1; k++ ) {
 
 
 
-			l = 1;
 			t = np + 1;
 			b = kq;
 
@@ -908,7 +896,7 @@ for ( k = 0; k < np - 1; k++ ) {
 			for ( i = 0; i < tot; i++ ) {
 
 
-				int colp_value = colp[ y[i]-1 ][0];
+				int colp_value = colp[ bz_y[i]-1 ][0];
 				if ( colp_value < 0 ) {
 					kk += colp_value;
 					n++;
@@ -945,7 +933,7 @@ for ( k = 0; k < np - 1; k++ ) {
 
 			kk = 0;
 			for ( i = 0; i < tot; i++ ) {
-				int diff = colp[ y[i]-1 ][0] - jj;
+				int diff = colp[ bz_y[i]-1 ][0] - jj;
 				j = SQUARED( diff );
 
 
@@ -954,7 +942,7 @@ for ( k = 0; k < np - 1; k++ ) {
 				if ( j > TXS && j < CTXS )
 					kk++;
 				else
-					y[i-kk] = y[i];
+					bz_y[i-kk] = bz_y[i];
 			} /* END FOR i */
 
 			tot -= kk;				/* Adjust the total edge pairs TOT based on # of edge pairs skipped */
@@ -970,7 +958,7 @@ for ( k = 0; k < np - 1; k++ ) {
 
 
 			for ( i = tot-1 ; i >= 0; i-- ) {
-				int idx = y[i] - 1;
+				int idx = bz_y[i] - 1;
 				if ( rk[idx] == 0 ) {
 					sc[idx] = -1;
 				} else {
@@ -988,7 +976,7 @@ for ( k = 0; k < np - 1; k++ ) {
 			int pd = 0;
 
 			for ( i = 0; i < tot; i++ ) {
-				int idx = y[i] - 1;
+				int idx = bz_y[i] - 1;
 				for ( ii = 1; ii < 4; ii++ ) {
 
 
@@ -1167,7 +1155,7 @@ for ( k = 0; k < np - 1; k++ ) {
 
 				if ( ll ) {
 
-					if ( m1_xyt )
+					if ( 0 )
 						fi = ( 180.0F / PI_SINGLE ) * atanf( (float) -jj / (float) ll );
 					else
 						fi = ( 180.0F / PI_SINGLE ) * atanf( (float) jj / (float) ll );
@@ -1187,7 +1175,7 @@ for ( k = 0; k < np - 1; k++ ) {
 						jj += 360;
 				} else {
 
-					if ( m1_xyt ) {
+					if ( 0 ) {
 						if ( jj > 0 )
 							jj = -90;
 						else
@@ -1204,7 +1192,7 @@ for ( k = 0; k < np - 1; k++ ) {
 
 				if ( kk ) {
 
-					if ( m1_xyt )
+					if ( 0 )
 						fi = ( 180.0F / PI_SINGLE ) * atanf( (float) -j / (float) kk );
 					else
 						fi = ( 180.0F / PI_SINGLE ) * atanf( (float) j / (float) kk );
@@ -1224,7 +1212,7 @@ for ( k = 0; k < np - 1; k++ ) {
 						j += 360;
 				} else {
 
-					if ( m1_xyt ) {
+					if ( 0 ) {
 						if ( j > 0 )
 							j = -90;
 						else
@@ -1488,7 +1476,7 @@ return match_score;
 /* extern int rk[ RK_SIZE ]; */
 /* extern int cp[ CP_SIZE ]; */
 /* extern int rp[ RP_SIZE ]; */
-/* extern int y[ Y_SIZE ]; */
+/* extern int bz_y[ Y_SIZE ]; */
 
 void bz_sift(
 	int * ww,		/* INPUT and OUTPUT; endpoint groups index; *ww may be bumped by one or by two */
@@ -1519,7 +1507,7 @@ if ( n == 0 && t == 0 ) {
 
 
 	if ( sc[kx-1] != ftt ) {
-		y[ (*tot)++ ] = kx;
+		bz_y[ (*tot)++ ] = kx;
 		rk[kx-1] = sc[kx-1];
 		sc[kx-1] = ftt;
 	}
@@ -1565,7 +1553,7 @@ if ( n == l ) {
 			qq[*qh]  = kz;
 			zz[kz-1] = (*qh)++;
 		}
-		y[(*tot)++] = kx;
+		bz_y[(*tot)++] = kx;
 		rk[kx-1] = sc[kx-1];
 		sc[kx-1] = ftt;
 	}
@@ -1611,7 +1599,7 @@ if ( n ) {
 	notfound = 1;
 
 #ifndef NOVERBOSE
-	if ( verbose_bozorth ) {
+	if ( 0 ) {
 		int * llptr = lptr;
 		printf( "bz_sift(): n: looking for l=%d in [", l );
 		for ( i = 0; i < lim; i++ ) {
@@ -1657,7 +1645,7 @@ if ( t ) {
 	notfound = 1;
 
 #ifndef NOVERBOSE
-	if ( verbose_bozorth ) {
+	if ( 0 ) {
 		int * llptr = lptr;
 		printf( "bz_sift(): t: looking for kz=%d in [", kz );
 		for ( i = 0; i < lim; i++ ) {
@@ -1709,12 +1697,12 @@ for ( ii = 0; ii < tp; ii++ ) {				/* For each index up to the current value of 
 		}
 
 		t     = 0;
-		y[0]  = lim;
+		bz_y[0]  = lim;
 		cp[0] = 1;
 		b     = 0;
 		n     = 1;
 		do {					/* looping until T < 0 ... */
-			if ( y[t] - cp[t] > 1 ) {
+			if (bz_y[t] - cp[t] > 1 ) {
 				k = sct[cp[t]][t];
 				j = ctt[k] + 1;
 				for ( i = 0; i < j; i++ ) {
@@ -1727,25 +1715,25 @@ for ( ii = 0; ii < tp; ii++ ) {				/* For each index up to the current value of 
 				do {
 					while ( rp[jj] < sct[kk][t] && jj < j )
 						jj++;
-					while ( rp[jj] > sct[kk][t] && kk < y[t] )
+					while ( rp[jj] > sct[kk][t] && kk < bz_y[t] )
 						kk++;
-					while ( rp[jj] == sct[kk][t] && kk < y[t] && jj < j ) {
+					while ( rp[jj] == sct[kk][t] && kk < bz_y[t] && jj < j ) {
 						sct[k][t+1] = sct[kk][t];
 						k++;
 						kk++;
 						jj++;
 					}
-				} while ( kk < y[t] && jj < j );
+				} while ( kk < bz_y[t] && jj < j );
 
 				t++;
 				cp[t] = 1;
-				y[t]  = k;
+				bz_y[t]  = k;
 				b     = t;
 				n     = 1;
 			} else {
 				int tot = 0;
 
-				lim = y[t];
+				lim = bz_y[t];
 				for ( i = n-1; i < lim; i++ ) {
 					tot += ct[ sct[i][t] ];
 				}
@@ -1762,7 +1750,7 @@ for ( ii = 0; ii < tp; ii++ ) {				/* For each index up to the current value of 
 
 					{
 					int rk_index = b;
-					lim = y[t];
+					lim = bz_y[t];
 					for ( i = n-1; i < lim; ) {
 						rk[ rk_index++ ] = sct[ i++ ][ t ];
 					}
@@ -1772,7 +1760,7 @@ for ( ii = 0; ii < tp; ii++ ) {				/* For each index up to the current value of 
 				t--;
 				if ( t >= 0 ) {
 					++cp[t];
-					n = y[t];
+					n = bz_y[t];
 				}
 			} /* END IF */
 

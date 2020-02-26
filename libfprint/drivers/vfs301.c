@@ -21,285 +21,261 @@
 
 #define FP_COMPONENT "vfs301"
 
-#include <errno.h>
-#include <signal.h>
-#include <string.h>
-#include <stdio.h>
-#include <assert.h>
-#include <stdlib.h>
-#include <libusb-1.0/libusb.h>
+#include "drivers_api.h"
+#include "vfs301.h"
 
-#include "vfs301_proto.h"
-#include <unistd.h>
-
-#include <fp_internal.h>
-
-#include "driver_ids.h"
+G_DEFINE_TYPE (FpDeviceVfs301, fpi_device_vfs301, FP_TYPE_IMAGE_DEVICE)
 
 /************************** GENERIC STUFF *************************************/
 
-/* Callback of asynchronous sleep */
-static void async_sleep_cb(void *data)
+static int
+submit_image (FpiSsm        *ssm,
+              FpImageDevice *dev)
 {
-	struct fpi_ssm *ssm = data;
-
-	fpi_ssm_next_state(ssm);
-}
-
-/* Submit asynchronous sleep */
-static void async_sleep(unsigned int msec, struct fpi_ssm *ssm)
-{
-	struct fp_img_dev *dev = ssm->priv;
-	struct fpi_timeout *timeout;
-
-	/* Add timeout */
-	timeout = fpi_timeout_add(msec, async_sleep_cb, ssm);
-
-	if (timeout == NULL) {
-		/* Failed to add timeout */
-		fp_err("failed to add timeout");
-		fpi_imgdev_session_error(dev, -ETIME);
-		fpi_ssm_mark_aborted(ssm, -ETIME);
-	}
-}
-
-static int submit_image(struct fpi_ssm *ssm)
-{
-	struct fp_img_dev *dev = ssm->priv;
-	vfs301_dev_t *vdev = dev->priv;
-	int height;
-	struct fp_img *img;
+  FpDeviceVfs301 *self = FPI_DEVICE_VFS301 (dev);
+  int height;
+  FpImage *img;
 
 #if 0
-	/* XXX: This is probably handled by libfprint automagically? */
-	if (vdev->scanline_count < 20) {
-		fpi_ssm_jump_to_state(ssm, M_REQUEST_PRINT);
-		return 0;
-	}
+  /* XXX: This is probably handled by libfprint automagically? */
+  if (vdev->scanline_count < 20)
+    {
+      fpi_ssm_jump_to_state (ssm, M_REQUEST_PRINT);
+      return 0;
+    }
 #endif
 
-	img = fpi_img_new(VFS301_FP_OUTPUT_WIDTH * vdev->scanline_count);
-	if (img == NULL)
-		return 0;
+  img = fp_image_new (VFS301_FP_OUTPUT_WIDTH, self->scanline_count);
+  if (img == NULL)
+    return 0;
 
-	vfs301_extract_image(vdev, img->data, &height);
+  vfs301_extract_image (self, img->data, &height);
 
-	/* TODO: how to detect flip? should the resulting image be
-	 * oriented so that it is equal e.g. to a fingerprint on a paper,
-	 * or to the finger when I look at it?) */
-	img->flags = FP_IMG_COLORS_INVERTED | FP_IMG_V_FLIPPED;
+  /* TODO: how to detect flip? should the resulting image be
+   * oriented so that it is equal e.g. to a fingerprint on a paper,
+   * or to the finger when I look at it?) */
+  img->flags = FPI_IMAGE_COLORS_INVERTED | FPI_IMAGE_V_FLIPPED;
 
-	img->width = VFS301_FP_OUTPUT_WIDTH;
-	img->height = height;
+  /* The image buffer is larger at this point, but that does not
+   * matter. */
+  img->width = VFS301_FP_OUTPUT_WIDTH;
+  img->height = height;
 
-	img = fpi_img_resize(img, img->height * img->width);
-	fpi_imgdev_image_captured(dev, img);
+  fpi_image_device_image_captured (dev, img);
 
-	return 1;
+  return 1;
 }
 
 /* Loop ssm states */
-enum
-{
-	/* Step 0 - Scan finger */
-	M_REQUEST_PRINT,
-	M_WAIT_PRINT,
-	M_CHECK_PRINT,
-	M_READ_PRINT_START,
-	M_READ_PRINT_WAIT,
-	M_READ_PRINT_POLL,
-	M_SUBMIT_PRINT,
+enum {
+  /* Step 0 - Scan finger */
+  M_REQUEST_PRINT,
+  M_WAIT_PRINT,
+  M_CHECK_PRINT,
+  M_READ_PRINT_START,
+  M_READ_PRINT_WAIT,
+  M_READ_PRINT_POLL,
+  M_SUBMIT_PRINT,
 
-	/* Number of states */
-	M_LOOP_NUM_STATES,
+  /* Number of states */
+  M_LOOP_NUM_STATES,
 };
 
 /* Exec loop sequential state machine */
-static void m_loop_state(struct fpi_ssm *ssm)
+static void
+m_loop_state (FpiSsm *ssm, FpDevice *_dev)
 {
-	struct fp_img_dev *dev = ssm->priv;
-	vfs301_dev_t *vdev = dev->priv;
+  FpImageDevice *dev = FP_IMAGE_DEVICE (_dev);
+  FpDeviceVfs301 *self = FPI_DEVICE_VFS301 (_dev);
 
-	switch (ssm->cur_state) {
-	case M_REQUEST_PRINT:
-		vfs301_proto_request_fingerprint(dev->udev, vdev);
-		fpi_ssm_next_state(ssm);
-		break;
+  switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case M_REQUEST_PRINT:
+      vfs301_proto_request_fingerprint (self);
+      fpi_ssm_next_state (ssm);
+      break;
 
-	case M_WAIT_PRINT:
-		/* Wait fingerprint scanning */
-		async_sleep(200, ssm);
-		break;
+    case M_WAIT_PRINT:
+      /* Wait fingerprint scanning */
+      fpi_ssm_next_state_delayed (ssm, 200, NULL);
+      break;
 
-	case M_CHECK_PRINT:
-		if (!vfs301_proto_peek_event(dev->udev, vdev))
-			fpi_ssm_jump_to_state(ssm, M_WAIT_PRINT);
-		else
-			fpi_ssm_next_state(ssm);
-		break;
+    case M_CHECK_PRINT:
+      if (!vfs301_proto_peek_event (self))
+        fpi_ssm_jump_to_state (ssm, M_WAIT_PRINT);
+      else
+        fpi_ssm_next_state (ssm);
+      break;
 
-	case M_READ_PRINT_START:
-		fpi_imgdev_report_finger_status(dev, TRUE);
-		vfs301_proto_process_event_start(dev->udev, vdev);
-		fpi_ssm_next_state(ssm);
-		break;
+    case M_READ_PRINT_START:
+      fpi_image_device_report_finger_status (dev, TRUE);
+      vfs301_proto_process_event_start (self);
+      fpi_ssm_next_state (ssm);
+      break;
 
-	case M_READ_PRINT_WAIT:
-		/* Wait fingerprint scanning */
-		async_sleep(200, ssm);
-		break;
+    case M_READ_PRINT_WAIT:
+      /* Wait fingerprint scanning */
+      fpi_ssm_next_state_delayed (ssm, 200, NULL);
+      break;
 
-	case M_READ_PRINT_POLL:
-		{
-		int rv = vfs301_proto_process_event_poll(dev->udev, vdev);
-		assert(rv != VFS301_FAILURE);
-		if (rv == VFS301_ONGOING)
-			fpi_ssm_jump_to_state(ssm, M_READ_PRINT_WAIT);
-		else
-			fpi_ssm_next_state(ssm);
-		}
-		break;
+    case M_READ_PRINT_POLL:
+      {
+        int rv = vfs301_proto_process_event_poll (self);
+        g_assert (rv != VFS301_FAILURE);
+        if (rv == VFS301_ONGOING)
+          fpi_ssm_jump_to_state (ssm, M_READ_PRINT_WAIT);
+        else
+          fpi_ssm_next_state (ssm);
+      }
+      break;
 
-	case M_SUBMIT_PRINT:
-		if (submit_image(ssm)) {
-			fpi_ssm_mark_completed(ssm);
-			/* NOTE: finger off is expected only after submitting image... */
-			fpi_imgdev_report_finger_status(dev, FALSE);
-		} else {
-			fpi_ssm_jump_to_state(ssm, M_REQUEST_PRINT);
-		}
-		break;
-	}
+    case M_SUBMIT_PRINT:
+      if (submit_image (ssm, dev))
+        {
+          fpi_ssm_mark_completed (ssm);
+          /* NOTE: finger off is expected only after submitting image... */
+          fpi_image_device_report_finger_status (dev, FALSE);
+        }
+      else
+        {
+          fpi_ssm_jump_to_state (ssm, M_REQUEST_PRINT);
+        }
+      break;
+
+    default:
+      g_assert_not_reached ();
+    }
 }
 
 /* Complete loop sequential state machine */
-static void m_loop_complete(struct fpi_ssm *ssm)
+static void
+m_loop_complete (FpiSsm *ssm, FpDevice *_dev, GError *error)
 {
-	/* Free sequential state machine */
-	fpi_ssm_free(ssm);
+  if (error)
+    {
+      g_warning ("State machine completed with an error: %s", error->message);
+      g_error_free (error);
+    }
+  /* Free sequential state machine */
 }
 
 /* Exec init sequential state machine */
-static void m_init_state(struct fpi_ssm *ssm)
+static void
+m_init_state (FpiSsm *ssm, FpDevice *_dev)
 {
-	struct fp_img_dev *dev = ssm->priv;
-	vfs301_dev_t *vdev = dev->priv;
+  FpDeviceVfs301 *self = FPI_DEVICE_VFS301 (_dev);
 
-	assert(ssm->cur_state == 0);
+  g_assert (fpi_ssm_get_cur_state (ssm) == 0);
 
-	vfs301_proto_init(dev->udev, vdev);
+  vfs301_proto_init (self);
 
-	fpi_ssm_mark_completed(ssm);
+  fpi_ssm_mark_completed (ssm);
 }
 
 /* Complete init sequential state machine */
-static void m_init_complete(struct fpi_ssm *ssm)
+static void
+m_init_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
-	struct fp_img_dev *dev = ssm->priv;
-	struct fpi_ssm *ssm_loop;
+  FpiSsm *ssm_loop;
 
-	if (!ssm->error) {
-		/* Notify activate complete */
-		fpi_imgdev_activate_complete(dev, 0);
+  fpi_image_device_activate_complete (FP_IMAGE_DEVICE (dev), error);
+  if (!error)
+    {
+      /* Notify activate complete */
 
-		/* Start loop ssm */
-		ssm_loop = fpi_ssm_new(dev->dev, m_loop_state, M_LOOP_NUM_STATES);
-		ssm_loop->priv = dev;
-		fpi_ssm_start(ssm_loop, m_loop_complete);
-	}
+      /* Start loop ssm */
+      ssm_loop = fpi_ssm_new (dev, m_loop_state, M_LOOP_NUM_STATES);
+      fpi_ssm_start (ssm_loop, m_loop_complete);
+    }
 
-	/* Free sequential state machine */
-	fpi_ssm_free(ssm);
+  /* Free sequential state machine */
 }
 
 /* Activate device */
-static int dev_activate(struct fp_img_dev *dev, enum fp_imgdev_state state)
+static void
+dev_activate (FpImageDevice *dev)
 {
-	struct fpi_ssm *ssm;
+  FpiSsm *ssm;
 
-	/* Start init ssm */
-	ssm = fpi_ssm_new(dev->dev, m_init_state, 1);
-	ssm->priv = dev;
-	fpi_ssm_start(ssm, m_init_complete);
-
-	return 0;
+  /* Start init ssm */
+  ssm = fpi_ssm_new (FP_DEVICE (dev), m_init_state, 1);
+  fpi_ssm_start (ssm, m_init_complete);
 }
 
 /* Deactivate device */
-static void dev_deactivate(struct fp_img_dev *dev)
+static void
+dev_deactivate (FpImageDevice *dev)
 {
-	fpi_imgdev_deactivate_complete(dev);
+  FpDeviceVfs301 *self;
+
+  self = FPI_DEVICE_VFS301 (dev);
+  vfs301_proto_deinit (self);
+  fpi_image_device_deactivate_complete (dev, NULL);
 }
 
-static int dev_open(struct fp_img_dev *dev, unsigned long driver_data)
+static void
+dev_open (FpImageDevice *dev)
 {
-	vfs301_dev_t *vdev = NULL;
-	int r;
+  FpDeviceVfs301 *self = FPI_DEVICE_VFS301 (dev);
+  GError *error = NULL;
 
-	/* Claim usb interface */
-	r = libusb_claim_interface(dev->udev, 0);
-	if (r < 0) {
-		/* Interface not claimed, return error */
-		fp_err("could not claim interface 0: %s", libusb_error_name(r));
-		return r;
-	}
+  /* Claim usb interface */
+  g_usb_device_claim_interface (fpi_device_get_usb_device (FP_DEVICE (dev)), 0, 0, &error);
 
-	/* Initialize private structure */
-	vdev = g_malloc0(sizeof(vfs301_dev_t));
-	dev->priv = vdev;
+  /* Initialize private structure */
+  self->scanline_count = 0;
 
-	vdev->scanline_buf = malloc(0);
-	vdev->scanline_count = 0;
-
-	/* Notify open complete */
-	fpi_imgdev_open_complete(dev, 0);
-
-	return 0;
+  /* Notify open complete */
+  fpi_image_device_open_complete (dev, error);
 }
 
-static void dev_close(struct fp_img_dev *dev)
+static void
+dev_close (FpImageDevice *dev)
 {
-	/* Release private structure */
-	free(((vfs301_dev_t*)dev->priv)->scanline_buf);
-	g_free(dev->priv);
+  FpDeviceVfs301 *self = FPI_DEVICE_VFS301 (dev);
+  GError *error = NULL;
 
-	/* Release usb interface */
-	libusb_release_interface(dev->udev, 0);
+  /* Release private structure */
+  g_clear_pointer (&self->scanline_buf, g_free);
 
-	/* Notify close complete */
-	fpi_imgdev_close_complete(dev);
+  /* Release usb interface */
+  g_usb_device_release_interface (fpi_device_get_usb_device (FP_DEVICE (dev)),
+                                  0, 0, &error);
+
+  /* Notify close complete */
+  fpi_image_device_close_complete (dev, error);
 }
 
 /* Usb id table of device */
-static const struct usb_id id_table[] =
-{
-	{ .vendor = 0x138a, .product = 0x0005 /* vfs301 */ },
-	{ .vendor = 0x138a, .product = 0x0008 /* vfs300 */ },
-	{ 0, 0, 0, },
+static const FpIdEntry id_table[] = {
+  { /* vfs301 */ .vid = 0x138a,  .pid = 0x0005, },
+  { /* vfs300 */ .vid = 0x138a,  .pid = 0x0008, },
+  { .vid = 0,  .pid = 0,  .driver_data = 0 },
 };
 
-/* Device driver definition */
-struct fp_img_driver vfs301_driver =
+static void
+fpi_device_vfs301_init (FpDeviceVfs301 *self)
 {
-	/* Driver specification */
-	.driver =
-	{
-		.id = VFS301_ID,
-		.name = FP_COMPONENT,
-		.full_name = "Validity VFS301",
-		.id_table = id_table,
-		.scan_type = FP_SCAN_TYPE_SWIPE,
-	},
+}
+static void
+fpi_device_vfs301_class_init (FpDeviceVfs301Class *klass)
+{
+  FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
+  FpImageDeviceClass *img_class = FP_IMAGE_DEVICE_CLASS (klass);
 
-	/* Image specification */
-	.flags = 0,
-	.img_width = VFS301_FP_WIDTH,
-	.img_height = -1,
-	.bz3_threshold = 24,
+  dev_class->id = "vfs301";
+  dev_class->full_name = "Validity VFS301";
+  dev_class->type = FP_DEVICE_TYPE_USB;
+  dev_class->id_table = id_table;
+  dev_class->scan_type = FP_SCAN_TYPE_SWIPE;
 
-	/* Routine specification */
-	.open = dev_open,
-	.close = dev_close,
-	.activate = dev_activate,
-	.deactivate = dev_deactivate,
-};
+  img_class->img_open = dev_open;
+  img_class->img_close = dev_close;
+  img_class->activate = dev_activate;
+  img_class->deactivate = dev_deactivate;
+
+  img_class->bz3_threshold = 24;
+
+  img_class->img_width = VFS301_FP_WIDTH;
+  img_class->img_height = -1;
+}

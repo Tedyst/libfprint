@@ -38,135 +38,131 @@
 
 #define FP_COMPONENT "elan"
 
-#include <errno.h>
-#include <libusb.h>
-#include <assembling.h>
-#include <fp_internal.h>
-#include <fprint.h>
-#include <stdlib.h>
-
+#include "drivers_api.h"
 #include "elan.h"
-#include "driver_ids.h"
 
-#define dbg_buf(buf, len)                                     \
-  if (len == 1)                                               \
-    fp_dbg("%02hx", buf[0]);                                  \
-  else if (len == 2)                                          \
-    fp_dbg("%04hx", buf[0] << 8 | buf[1]);                    \
-  else if (len > 2)                                           \
-    fp_dbg("%04hx... (%d bytes)", buf[0] << 8 | buf[1], len)
-
-unsigned char elan_get_pixel(struct fpi_frame_asmbl_ctx *ctx,
-			     struct fpi_frame *frame, unsigned int x,
-			     unsigned int y)
+static unsigned char
+elan_get_pixel (struct fpi_frame_asmbl_ctx *ctx,
+                struct fpi_frame *frame, unsigned int x,
+                unsigned int y)
 {
-	return frame->data[x + y * ctx->frame_width];
+    return frame->data[x + y * ctx->frame_width];
 }
 
 static struct fpi_frame_asmbl_ctx assembling_ctx = {
-	.frame_width = 0,
-	.frame_height = 0,
-	.image_width = 0,
-	.get_pixel = elan_get_pixel,
+    .frame_width = 0,
+    .frame_height = 0,
+    .image_width = 0,
+    .get_pixel = elan_get_pixel,
 };
 
-struct elan_dev {
-	/* device config */
-	unsigned short dev_type;
-	unsigned short fw_ver;
-	void (*process_frame) (unsigned short *raw_frame, GSList ** frames);
-	/* end device config */
+struct _FpiDeviceElan
+{
+    FpImageDevice parent;
 
-	/* commands */
-	const struct elan_cmd *cmd;
-	int cmd_timeout;
-	struct libusb_transfer *cur_transfer;
-	/* end commands */
+    /* device config */
+    unsigned short dev_type;
+    unsigned short fw_ver;
+    void           (*process_frame) (unsigned short *raw_frame,
+                                     GSList       ** frames);
+    /* end device config */
 
-	/* state */
-	enum fp_imgdev_state dev_state;
-	enum fp_imgdev_state dev_state_next;
-	unsigned char *last_read;
-	unsigned char calib_atts_left;
-	unsigned char calib_status;
-	unsigned short *background;
-	unsigned char frame_width;
-	unsigned char frame_height;
-	unsigned char raw_frame_height;
-	int num_frames;
-	GSList *frames;
-	/* end state */
+    /* commands */
+    const struct elan_cmd *cmd;
+    int                    cmd_timeout;
+    /* end commands */
+
+    /* state */
+    gboolean            deactivating;
+    FpiImageDeviceState dev_state;
+    FpiImageDeviceState dev_state_next;
+    unsigned char      *last_read;
+    unsigned char       calib_atts_left;
+    unsigned char       calib_status;
+    unsigned short     *background;
+    unsigned char       frame_width;
+    unsigned char       frame_height;
+    unsigned char       raw_frame_height;
+    int                 num_frames;
+    GSList             *frames;
+    /* end state */
 };
+G_DECLARE_FINAL_TYPE (FpiDeviceElan, fpi_device_elan, FPI, DEVICE_ELAN,
+                      FpImageDevice);
+G_DEFINE_TYPE (FpiDeviceElan, fpi_device_elan, FP_TYPE_IMAGE_DEVICE);
 
-int cmp_short(const void *a, const void *b)
+static int
+cmp_short (const void *a, const void *b)
 {
-	return (int)(*(short *)a - *(short *)b);
+    return (int) (*(short *) a - *(short *) b);
 }
 
-static void elan_dev_reset(struct elan_dev *elandev)
+static void
+elan_dev_reset_state (FpiDeviceElan *elandev)
 {
-	fp_dbg("");
+    G_DEBUG_HERE ();
 
-	BUG_ON(elandev->cur_transfer);
+    elandev->cmd = NULL;
+    elandev->cmd_timeout = ELAN_CMD_TIMEOUT;
 
-	elandev->cmd = NULL;
-	elandev->cmd_timeout = ELAN_CMD_TIMEOUT;
+    elandev->calib_status = 0;
 
-	elandev->calib_status = 0;
+    g_free (elandev->last_read);
+    elandev->last_read = NULL;
 
-	g_free(elandev->last_read);
-	elandev->last_read = NULL;
-
-	g_slist_free_full(elandev->frames, g_free);
-	elandev->frames = NULL;
-	elandev->num_frames = 0;
+    g_slist_free_full (elandev->frames, g_free);
+    elandev->frames = NULL;
+    elandev->num_frames = 0;
 }
 
-static void elan_save_frame(struct elan_dev *elandev, unsigned short *frame)
+static void
+elan_save_frame (FpiDeviceElan *self, unsigned short *frame)
 {
-	fp_dbg("");
+    G_DEBUG_HERE ();
 
-	/* so far 3 types of readers by sensor dimensions and orientation have been
-	 * seen in the wild:
-	 * 1. 144x64. Raw images are in portrait orientation while readers themselves
-	 *    are placed (e.g. built into a touchpad) in landscape orientation. These
-	 *    need to be rotated before assembling.
-	 * 2. 96x96 rotated. Like the first type but square. Likewise, need to be
-	 *    rotated before assembling.
-	 * 3. 96x96 normal. Square and need NOT be rotated. So far there's only been
-	 *    1 report of a 0c03 of this type. Hopefully this type can be identified
-	 *    by device id (and manufacturers don't just install the readers as they
-	 *    please).
-	 * we also discard stripes of 'frame_margin' from bottom and top because
-	 * assembling works bad for tall frames */
+    /* so far 3 types of readers by sensor dimensions and orientation have been
+     * seen in the wild:
+     * 1. 144x64. Raw images are in portrait orientation while readers themselves
+     *    are placed (e.g. built into a touchpad) in landscape orientation. These
+     *    need to be rotated before assembling.
+     * 2. 96x96 rotated. Like the first type but square. Likewise, need to be
+     *    rotated before assembling.
+     * 3. 96x96 normal. Square and need NOT be rotated. So far there's only been
+     *    1 report of a 0c03 of this type. Hopefully this type can be identified
+     *    by device id (and manufacturers don't just install the readers as they
+     *    please).
+     * we also discard stripes of 'frame_margin' from bottom and top because
+     * assembling works bad for tall frames */
 
-	unsigned char frame_width = elandev->frame_width;
-	unsigned char frame_height = elandev->frame_height;
-	unsigned char raw_height = elandev->raw_frame_height;
-	unsigned char frame_margin = (raw_height - elandev->frame_height) / 2;
-	int frame_idx, raw_idx;
+    unsigned char frame_width = self->frame_width;
+    unsigned char frame_height = self->frame_height;
+    unsigned char raw_height = self->raw_frame_height;
+    unsigned char frame_margin = (raw_height - self->frame_height) / 2;
+    int frame_idx, raw_idx;
 
-	for (int y = 0; y < frame_height; y++)
-		for (int x = 0; x < frame_width; x++) {
-			if (elandev->dev_type & ELAN_NOT_ROTATED)
-				raw_idx = x + (y + frame_margin) * frame_width;
-			else
-				raw_idx = frame_margin + y + x * raw_height;
-			frame_idx = x + y * frame_width;
-			frame[frame_idx] =
-			    ((unsigned short *)elandev->last_read)[raw_idx];
-		}
+    for (int y = 0; y < frame_height; y++)
+        for (int x = 0; x < frame_width; x++)
+        {
+            if (self->dev_type & ELAN_NOT_ROTATED)
+                raw_idx = x + (y + frame_margin) * frame_width;
+            else
+                raw_idx = frame_margin + y + x * raw_height;
+            frame_idx = x + y * frame_width;
+            frame[frame_idx] =
+                ((unsigned short *) self->last_read)[raw_idx];
+        }
 }
 
-static void elan_save_background(struct elan_dev *elandev)
+static void
+elan_save_background (FpiDeviceElan *elandev)
 {
-	fp_dbg("");
+    G_DEBUG_HERE ();
 
-	g_free(elandev->background);
-	elandev->background =
-	    g_malloc(elandev->frame_width * elandev->frame_height *
-		     sizeof(short));
-	elan_save_frame(elandev, elandev->background);
+    g_free (elandev->background);
+    elandev->background =
+        g_malloc (elandev->frame_width * elandev->frame_height *
+                  sizeof (short));
+    elan_save_frame (elandev, elandev->background);
 }
 
 /* save a frame as part of the fingerprint image
@@ -204,744 +200,917 @@ static void elan_save_background(struct elan_dev *elandev)
  *                  \
  *    ======== 0     \___> ======== 0
  */
-static int elan_save_img_frame(struct elan_dev *elandev)
+static int
+elan_save_img_frame (FpiDeviceElan *elandev)
 {
-	fp_dbg("");
+    G_DEBUG_HERE ();
 
-	unsigned int frame_size = elandev->frame_width * elandev->frame_height;
-	unsigned short *frame = g_malloc(frame_size * sizeof(short));
-	elan_save_frame(elandev, frame);
-	unsigned int sum = 0;
+    unsigned int frame_size = elandev->frame_width * elandev->frame_height;
+    unsigned short *frame = g_malloc (frame_size * sizeof (short));
+    elan_save_frame (elandev, frame);
+    unsigned int sum = 0;
 
-	for (int i = 0; i < frame_size; i++) {
-		if (elandev->background[i] > frame[i])
-			frame[i] = 0;
-		else
-			frame[i] -= elandev->background[i];
-		sum += frame[i];
-	}
+    for (int i = 0; i < frame_size; i++)
+    {
+        if (elandev->background[i] > frame[i])
+            frame[i] = 0;
+        else
+            frame[i] -= elandev->background[i];
+        sum += frame[i];
+    }
 
-	if (sum == 0) {
-		fp_dbg
-		    ("frame darker that background; finger present during calibration?");
-		return -1;
-	}
+    if (sum == 0)
+    {
+        fp_dbg
+        ("frame darker than background; finger present during calibration?");
+        g_free (frame);
+        return -1;
+    }
 
-	elandev->frames = g_slist_prepend(elandev->frames, frame);
-	elandev->num_frames += 1;
-	return 0;
+    elandev->frames = g_slist_prepend (elandev->frames, frame);
+    elandev->num_frames += 1;
+    return 0;
 }
 
-static void elan_process_frame_linear(unsigned short *raw_frame,
-				      GSList ** frames)
+static void
+elan_process_frame_linear (unsigned short *raw_frame,
+                           GSList       ** frames)
 {
-	fp_dbg("");
+    unsigned int frame_size =
+        assembling_ctx.frame_width * assembling_ctx.frame_height;
+    struct fpi_frame *frame =
+        g_malloc (frame_size + sizeof (struct fpi_frame));
 
-	unsigned int frame_size =
-	    assembling_ctx.frame_width * assembling_ctx.frame_height;
-	struct fpi_frame *frame =
-	    g_malloc(frame_size + sizeof(struct fpi_frame));
+    G_DEBUG_HERE ();
 
-	unsigned short min = 0xffff, max = 0;
-	for (int i = 0; i < frame_size; i++) {
-		if (raw_frame[i] < min)
-			min = raw_frame[i];
-		if (raw_frame[i] > max)
-			max = raw_frame[i];
-	}
+    unsigned short min = 0xffff, max = 0;
+    for (int i = 0; i < frame_size; i++)
+    {
+        if (raw_frame[i] < min)
+            min = raw_frame[i];
+        if (raw_frame[i] > max)
+            max = raw_frame[i];
+    }
 
-	unsigned short px;
-	for (int i = 0; i < frame_size; i++) {
-		px = raw_frame[i];
-		px = (px - min) * 0xff / (max - min);
-		frame->data[i] = (unsigned char)px;
-	}
+    g_assert (max != min);
 
-	*frames = g_slist_prepend(*frames, frame);
+    unsigned short px;
+    for (int i = 0; i < frame_size; i++)
+    {
+        px = raw_frame[i];
+        px = (px - min) * 0xff / (max - min);
+        frame->data[i] = (unsigned char) px;
+    }
+
+    *frames = g_slist_prepend (*frames, frame);
 }
 
-static void elan_process_frame_thirds(unsigned short *raw_frame,
-				      GSList ** frames)
+static void
+elan_process_frame_thirds (unsigned short *raw_frame,
+                           GSList       ** frames)
 {
-	fp_dbg("");
+    G_DEBUG_HERE ();
 
-	unsigned int frame_size =
-	    assembling_ctx.frame_width * assembling_ctx.frame_height;
-	struct fpi_frame *frame =
-	    g_malloc(frame_size + sizeof(struct fpi_frame));
+    unsigned int frame_size =
+        assembling_ctx.frame_width * assembling_ctx.frame_height;
+    struct fpi_frame *frame =
+        g_malloc (frame_size + sizeof (struct fpi_frame));
 
-	unsigned short lvl0, lvl1, lvl2, lvl3;
-	unsigned short *sorted = g_malloc(frame_size * sizeof(short));
-	memcpy(sorted, raw_frame, frame_size * sizeof(short));
-	qsort(sorted, frame_size, sizeof(short), cmp_short);
-	lvl0 = sorted[0];
-	lvl1 = sorted[frame_size * 3 / 10];
-	lvl2 = sorted[frame_size * 65 / 100];
-	lvl3 = sorted[frame_size - 1];
-	g_free(sorted);
+    unsigned short lvl0, lvl1, lvl2, lvl3;
+    unsigned short *sorted = g_malloc (frame_size * sizeof (short));
+    memcpy (sorted, raw_frame, frame_size * sizeof (short));
+    qsort (sorted, frame_size, sizeof (short), cmp_short);
+    lvl0 = sorted[0];
+    lvl1 = sorted[frame_size * 3 / 10];
+    lvl2 = sorted[frame_size * 65 / 100];
+    lvl3 = sorted[frame_size - 1];
+    g_free (sorted);
 
-	unsigned short px;
-	for (int i = 0; i < frame_size; i++) {
-		px = raw_frame[i];
-		if (lvl0 <= px && px < lvl1)
-			px = (px - lvl0) * 99 / (lvl1 - lvl0);
-		else if (lvl1 <= px && px < lvl2)
-			px = 99 + ((px - lvl1) * 56 / (lvl2 - lvl1));
-		else		// (lvl2 <= px && px <= lvl3)
-			px = 155 + ((px - lvl2) * 100 / (lvl3 - lvl2));
-		frame->data[i] = (unsigned char)px;
-	}
+    unsigned short px;
+    for (int i = 0; i < frame_size; i++)
+    {
+        px = raw_frame[i];
+        if (lvl0 <= px && px < lvl1)
+            px = (px - lvl0) * 99 / (lvl1 - lvl0);
+        else if (lvl1 <= px && px < lvl2)
+            px = 99 + ((px - lvl1) * 56 / (lvl2 - lvl1));
+        else                      // (lvl2 <= px && px <= lvl3)
+            px = 155 + ((px - lvl2) * 100 / (lvl3 - lvl2));
+        frame->data[i] = (unsigned char) px;
+    }
 
-	*frames = g_slist_prepend(*frames, frame);
+    *frames = g_slist_prepend (*frames, frame);
 }
 
-static void elan_submit_image(struct fp_img_dev *dev)
+static void
+elan_submit_image (FpImageDevice *dev)
 {
-	fp_dbg("");
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
+    GSList *raw_frames;
+    GSList *frames = NULL;
+    FpImage *img;
 
-	struct elan_dev *elandev = dev->priv;
-	GSList *frames = NULL;
-	struct fp_img *img;
+    G_DEBUG_HERE ();
 
-	for (int i = 0; i < ELAN_SKIP_LAST_FRAMES; i++)
-		elandev->frames = g_slist_next(elandev->frames);
-	elandev->num_frames -= ELAN_SKIP_LAST_FRAMES;
+    raw_frames = g_slist_nth (self->frames, ELAN_SKIP_LAST_FRAMES);
 
-	assembling_ctx.frame_width = elandev->frame_width;
-	assembling_ctx.frame_height = elandev->frame_height;
-	assembling_ctx.image_width = elandev->frame_width * 3 / 2;
-	g_slist_foreach(elandev->frames, (GFunc) elandev->process_frame,
-			&frames);
-	fpi_do_movement_estimation(&assembling_ctx, frames,
-				   elandev->num_frames);
-	img = fpi_assemble_frames(&assembling_ctx, frames, elandev->num_frames);
+    assembling_ctx.frame_width = self->frame_width;
+    assembling_ctx.frame_height = self->frame_height;
+    assembling_ctx.image_width = self->frame_width * 3 / 2;
+    g_slist_foreach (raw_frames, (GFunc) self->process_frame, &frames);
+    fpi_do_movement_estimation (&assembling_ctx, frames);
+    img = fpi_assemble_frames (&assembling_ctx, frames);
 
-	img->flags |= FP_IMG_PARTIAL;
-	fpi_imgdev_image_captured(dev, img);
+    g_slist_free_full (frames, g_free);
+
+    fpi_image_device_image_captured (dev, img);
 }
 
-static void elan_cmd_done(struct fpi_ssm *ssm)
+static void
+elan_cmd_done (FpiSsm *ssm)
 {
-	fp_dbg("");
-	fpi_ssm_next_state(ssm);
+    G_DEBUG_HERE ();
+    fpi_ssm_next_state (ssm);
 }
 
-static void elan_cmd_cb(struct libusb_transfer *transfer)
+static void
+elan_cmd_cb (FpiUsbTransfer *transfer, FpDevice *dev,
+             gpointer user_data, GError *error)
 {
-	struct fpi_ssm *ssm = transfer->user_data;
-	struct fp_img_dev *dev = ssm->priv;
-	struct elan_dev *elandev = dev->priv;
+    FpiSsm *ssm = transfer->ssm;
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
 
-	elandev->cur_transfer = NULL;
+    G_DEBUG_HERE ();
 
-	switch (transfer->status) {
-	case LIBUSB_TRANSFER_COMPLETED:
-		if (transfer->length != transfer->actual_length) {
-			fp_dbg("transfer length error: expected %d, got %d",
-			       transfer->length, transfer->actual_length);
-			elan_dev_reset(elandev);
-			fpi_ssm_mark_aborted(ssm, -EPROTO);
-		} else if (transfer->endpoint & LIBUSB_ENDPOINT_IN) {
-			/* just finished receiving */
-			dbg_buf(elandev->last_read, transfer->actual_length);
-			elan_cmd_done(ssm);
-		} else {
-			/* just finished sending */
-			fp_dbg("");
-			elan_cmd_read(ssm);
-		}
-		break;
-	case LIBUSB_TRANSFER_CANCELLED:
-		fp_dbg("transfer cancelled");
-		fpi_ssm_mark_aborted(ssm, -ECANCELED);
-		elan_deactivate(dev);
-		break;
-	case LIBUSB_TRANSFER_TIMED_OUT:
-		fp_dbg("transfer timed out");
-		fpi_ssm_mark_aborted(ssm, -ETIMEDOUT);
-		break;
-	default:
-		fp_dbg("transfer failed: %d", transfer->status);
-		elan_dev_reset(elandev);
-		fpi_ssm_mark_aborted(ssm, -EIO);
-	}
+    if (error)
+    {
+        /* XXX: In the cancellation case we used to not
+         *      mark the SSM as failed?! */
+        fpi_ssm_mark_failed (transfer->ssm, error);
+        return;
+    }
+
+    /* XXX: We used to reset the device in error cases! */
+    if (transfer->endpoint & FPI_USB_ENDPOINT_IN)
+    {
+        /* just finished receiving */
+        self->last_read = g_memdup (transfer->buffer, transfer->actual_length);
+        elan_cmd_done (ssm);
+    }
+    else
+    {
+        /* just finished sending */
+        G_DEBUG_HERE ();
+        elan_cmd_read (ssm, dev);
+    }
 }
 
-static void elan_cmd_read(struct fpi_ssm *ssm)
+static void
+elan_cmd_read (FpiSsm *ssm, FpDevice *dev)
 {
-	fp_dbg("");
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
+    FpiUsbTransfer *transfer;
+    GCancellable *cancellable = NULL;
+    int response_len = self->cmd->response_len;
 
-	struct fp_img_dev *dev = ssm->priv;
-	struct elan_dev *elandev = dev->priv;
-	int response_len = elandev->cmd->response_len;
+    G_DEBUG_HERE ();
 
-	if (elandev->cmd->response_len == ELAN_CMD_SKIP_READ) {
-		fp_dbg("skipping read, not expecting anything");
-		elan_cmd_done(ssm);
-		return;
-	}
+    if (self->cmd->response_len == ELAN_CMD_SKIP_READ)
+    {
+        fp_dbg ("skipping read, not expecting anything");
+        elan_cmd_done (ssm);
+        return;
+    }
 
-	if (elandev->cmd->cmd == get_image_cmd.cmd)
-		/* raw data has 2-byte "pixels" and the frame is vertical */
-		response_len =
-		    elandev->raw_frame_height * elandev->frame_width * 2;
+    if (self->dev_type == ELAN_0C42)
+    {
+        /* ELAN_0C42 sends an extra byte in one byte responses */
+        if (self->cmd->response_len == 1)
+            response_len = 2;
+    }
 
-	struct libusb_transfer *transfer = libusb_alloc_transfer(0);
-	if (!transfer) {
-		fpi_ssm_mark_aborted(ssm, -ENOMEM);
-		return;
-	}
-	elandev->cur_transfer = transfer;
+    if (self->cmd->cmd == get_image_cmd.cmd)
+        /* raw data has 2-byte "pixels" and the frame is vertical */
+        response_len =
+            self->raw_frame_height * self->frame_width * 2;
 
-	g_free(elandev->last_read);
-	elandev->last_read = g_malloc(response_len);
+    g_clear_pointer (&self->last_read, g_free);
 
-	libusb_fill_bulk_transfer(transfer, dev->udev,
-				  elandev->cmd->response_in, elandev->last_read,
-				  response_len, elan_cmd_cb, ssm,
-				  elandev->cmd_timeout);
-	transfer->flags = LIBUSB_TRANSFER_FREE_TRANSFER;
-	int r = libusb_submit_transfer(transfer);
-	if (r < 0)
-		fpi_ssm_mark_aborted(ssm, r);
+    transfer = fpi_usb_transfer_new (dev);
+    transfer->ssm = ssm;
+    transfer->short_is_error = TRUE;
+
+    fpi_usb_transfer_fill_bulk (transfer,
+                                self->cmd->response_in,
+                                response_len);
+
+    if (!self->cmd->never_cancel)
+        cancellable = fpi_device_get_cancellable (dev);
+
+    fpi_usb_transfer_submit (transfer, self->cmd_timeout, cancellable, elan_cmd_cb, NULL);
 }
 
-static void elan_run_cmd(struct fpi_ssm *ssm, const struct elan_cmd *cmd,
-			 int cmd_timeout)
+static void
+elan_run_cmd (FpiSsm                *ssm,
+              FpDevice              *dev,
+              const struct elan_cmd *cmd,
+              int                    cmd_timeout)
 {
-	dbg_buf(cmd->cmd, 2);
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
+    FpiUsbTransfer *transfer;
+    GCancellable *cancellable = NULL;
 
-	struct fp_img_dev *dev = ssm->priv;
-	struct elan_dev *elandev = dev->priv;
+    self->cmd = cmd;
+    if (cmd_timeout != -1)
+        self->cmd_timeout = cmd_timeout;
 
-	elandev->cmd = cmd;
-	if (cmd_timeout != -1)
-		elandev->cmd_timeout = cmd_timeout;
+    if (cmd->devices != ELAN_ALL_DEV && !(cmd->devices & self->dev_type))
+    {
+        fp_dbg ("skipping command 0x%x 0x%x for this device (for devices 0x%x but device is 0x%x)",
+                cmd->cmd[0], cmd->cmd[1], cmd->devices, self->dev_type);
+        elan_cmd_done (ssm);
+        return;
+    }
 
-	if (cmd->devices != ELAN_ALL_DEV && !(cmd->devices & elandev->dev_type)) {
-		fp_dbg("skipping for this device");
-		elan_cmd_done(ssm);
-		return;
-	}
+    transfer = fpi_usb_transfer_new (dev);
+    transfer->ssm = ssm;
+    transfer->short_is_error = TRUE;
 
-	struct libusb_transfer *transfer = libusb_alloc_transfer(0);
-	if (!transfer) {
-		fpi_ssm_mark_aborted(ssm, -ENOMEM);
-		return;
-	}
-	elandev->cur_transfer = transfer;
+    fpi_usb_transfer_fill_bulk_full (transfer,
+                                     ELAN_EP_CMD_OUT,
+                                     (guint8 *) cmd->cmd,
+                                     ELAN_CMD_LEN,
+                                     NULL);
 
-	libusb_fill_bulk_transfer(transfer, dev->udev, ELAN_EP_CMD_OUT,
-				  cmd->cmd, ELAN_CMD_LEN, elan_cmd_cb, ssm,
-				  elandev->cmd_timeout);
-	transfer->flags = LIBUSB_TRANSFER_FREE_TRANSFER;
-	int r = libusb_submit_transfer(transfer);
-	if (r < 0)
-		fpi_ssm_mark_aborted(ssm, r);
+    if (!self->cmd->never_cancel)
+        cancellable = fpi_device_get_cancellable (dev);
+
+    fpi_usb_transfer_submit (transfer,
+                             self->cmd_timeout,
+                             cancellable,
+                             elan_cmd_cb,
+                             NULL);
 }
 
 enum stop_capture_states {
-	STOP_CAPTURE,
-	STOP_CAPTURE_NUM_STATES,
+    STOP_CAPTURE,
+    STOP_CAPTURE_NUM_STATES,
 };
 
-static void stop_capture_run_state(struct fpi_ssm *ssm)
+static void
+stop_capture_run_state (FpiSsm *ssm, FpDevice *dev)
 {
-	fp_dbg("");
+    G_DEBUG_HERE ();
 
-	switch (ssm->cur_state) {
-	case STOP_CAPTURE:
-		elan_run_cmd(ssm, &stop_cmd, ELAN_CMD_TIMEOUT);
-		break;
-	}
+    switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case STOP_CAPTURE:
+        elan_run_cmd (ssm, dev, &stop_cmd,
+                      ELAN_CMD_TIMEOUT);
+        break;
+    }
 }
 
-static void stop_capture_complete(struct fpi_ssm *ssm)
+static void
+stop_capture_complete (FpiSsm *ssm, FpDevice *_dev, GError *error)
 {
-	fp_dbg("");
+    FpImageDevice *dev = FP_IMAGE_DEVICE (_dev);
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
 
-	struct fp_img_dev *dev = ssm->priv;
-	struct elan_dev *elandev = dev->priv;
-	int error = ssm->error;
+    G_DEBUG_HERE ();
 
-	fpi_ssm_free(ssm);
 
-	if (!error) {
-		fpi_imgdev_report_finger_status(dev, FALSE);
+    /* The device is inactive at this point. */
+    self->dev_state = FPI_IMAGE_DEVICE_STATE_INACTIVE;
 
-		/* If verify or identify fails because of short swipe, we need to restart
-		 * capture manually. It feels like libfprint or the application should know
-		 * better if they want to retry, but they don't. Unless we've been asked to
-		 * deactivate, try to re-enter the capture loop. Since state change is
-		 * async, there's still a chance to be deactivated by another pending
-		 * event. */
-		if (elandev->dev_state_next != IMGDEV_STATE_INACTIVE)
-			dev_change_state(dev, IMGDEV_STATE_AWAIT_FINGER_ON);
+    if (self->deactivating)
+    {
+        /* Simply complete the pending deactivation. */
+        self->deactivating = FALSE;
+        fpi_image_device_deactivate_complete (dev, error);
+        return;
+    }
 
-	} else if (error != -ECANCELED)
-		fpi_imgdev_abort_scan(dev, error);
+    if (!error)
+        fpi_image_device_report_finger_status (dev, FALSE);
+    else
+        /* NOTE: We cannot get a cancellation error here. */
+        fpi_image_device_session_error (dev, error);
 }
 
-static void elan_stop_capture(struct fp_img_dev *dev)
+static void
+elan_stop_capture (FpDevice *dev)
 {
-	fp_dbg("");
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
 
-	struct elan_dev *elandev = dev->priv;
+    G_DEBUG_HERE ();
 
-	elan_dev_reset(elandev);
+    elan_dev_reset_state (self);
 
-	struct fpi_ssm *ssm = fpi_ssm_new(dev->dev, stop_capture_run_state,
-					  STOP_CAPTURE_NUM_STATES);
-	ssm->priv = dev;
-	fpi_ssm_start(ssm, stop_capture_complete);
+    FpiSsm *ssm =
+        fpi_ssm_new (dev, stop_capture_run_state, STOP_CAPTURE_NUM_STATES);
+    fpi_ssm_start (ssm, stop_capture_complete);
 }
 
 enum capture_states {
-	CAPTURE_LED_ON,
-	CAPTURE_WAIT_FINGER,
-	CAPTURE_READ_DATA,
-	CAPTURE_CHECK_ENOUGH_FRAMES,
-	CAPTURE_NUM_STATES,
+    CAPTURE_LED_ON,
+    CAPTURE_WAIT_FINGER,
+    CAPTURE_READ_DATA,
+    CAPTURE_CHECK_ENOUGH_FRAMES,
+    CAPTURE_NUM_STATES,
 };
 
-static void capture_run_state(struct fpi_ssm *ssm)
+static void
+capture_run_state (FpiSsm *ssm, FpDevice *dev)
 {
-	struct fp_img_dev *dev = ssm->priv;
-	struct elan_dev *elandev = dev->priv;
-	int r;
+    FpImageDevice *idev = FP_IMAGE_DEVICE (dev);
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
+    int r;
 
-	switch (ssm->cur_state) {
-	case CAPTURE_LED_ON:
-		elan_run_cmd(ssm, &led_on_cmd, ELAN_CMD_TIMEOUT);
-		break;
-	case CAPTURE_WAIT_FINGER:
-		elan_run_cmd(ssm, &pre_scan_cmd, -1);
-		break;
-	case CAPTURE_READ_DATA:
-		/* 0x55 - finger present
-		 * 0xff - device not calibrated (probably) */
-		if (elandev->last_read && elandev->last_read[0] == 0x55) {
-			if (elandev->dev_state == IMGDEV_STATE_AWAIT_FINGER_ON)
-				fpi_imgdev_report_finger_status(dev, TRUE);
-			elan_run_cmd(ssm, &get_image_cmd, ELAN_CMD_TIMEOUT);
-		} else
-			fpi_ssm_mark_aborted(ssm, -EBADMSG);
-		break;
-	case CAPTURE_CHECK_ENOUGH_FRAMES:
-		r = elan_save_img_frame(elandev);
-		if (r < 0)
-			fpi_ssm_mark_aborted(ssm, r);
-		else if (elandev->num_frames < ELAN_MAX_FRAMES) {
-			/* quickly stop if finger is removed */
-			elandev->cmd_timeout = ELAN_FINGER_TIMEOUT;
-			fpi_ssm_jump_to_state(ssm, CAPTURE_WAIT_FINGER);
-		} else {
-			fpi_ssm_next_state(ssm);
-		}
-		break;
-	}
+    switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case CAPTURE_LED_ON:
+        elan_run_cmd (ssm, dev, &led_on_cmd, ELAN_CMD_TIMEOUT);
+        break;
+
+    case CAPTURE_WAIT_FINGER:
+        elan_run_cmd (ssm, dev, &pre_scan_cmd, -1);
+        break;
+
+    case CAPTURE_READ_DATA:
+        self->dev_state = FPI_IMAGE_DEVICE_STATE_CAPTURE;
+
+        /* 0x55 - finger present
+         * 0xff - device not calibrated (probably) */
+        if (self->last_read && self->last_read[0] == 0x55)
+        {
+            fpi_image_device_report_finger_status (idev, TRUE);
+            elan_run_cmd (ssm, dev, &get_image_cmd, ELAN_CMD_TIMEOUT);
+        }
+        else
+        {
+            /* XXX: The timeout is emulated incorrectly, resulting in a zero byte read. */
+            if (g_strcmp0 (g_getenv ("FP_DEVICE_EMULATION"), "1") == 0)
+                fpi_ssm_mark_completed (ssm);
+            else
+                fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_PROTO));
+        }
+        break;
+
+    case CAPTURE_CHECK_ENOUGH_FRAMES:
+        r = elan_save_img_frame (self);
+        if (r < 0)
+        {
+            fpi_ssm_mark_failed (ssm, fpi_device_error_new (FP_DEVICE_ERROR_GENERAL));
+        }
+        else if (self->num_frames < ELAN_MAX_FRAMES)
+        {
+            /* quickly stop if finger is removed */
+            self->cmd_timeout = ELAN_FINGER_TIMEOUT;
+            fpi_ssm_jump_to_state (ssm, CAPTURE_WAIT_FINGER);
+        }
+        else
+        {
+            fpi_ssm_next_state (ssm);
+        }
+        break;
+    }
 }
 
-static void capture_complete(struct fpi_ssm *ssm)
+static void
+capture_complete (FpiSsm *ssm, FpDevice *_dev, GError *error)
 {
-	fp_dbg("");
+    FpImageDevice *dev = FP_IMAGE_DEVICE (_dev);
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (_dev);
 
-	struct fp_img_dev *dev = ssm->priv;
-	struct elan_dev *elandev = dev->priv;
+    G_DEBUG_HERE ();
 
-	if (ssm->error == -ECANCELED) {
-		fpi_ssm_free(ssm);
-		return;
-	}
+    /* either max frames captured or timed out waiting for the next frame */
+    if (!error ||
+            (g_error_matches (error, G_USB_DEVICE_ERROR, G_USB_DEVICE_ERROR_TIMED_OUT) &&
+             fpi_ssm_get_cur_state (ssm) == CAPTURE_WAIT_FINGER))
+    {
+        if (self->num_frames >= ELAN_MIN_FRAMES)
+        {
+            elan_submit_image (dev);
+        }
+        else
+        {
+            fp_dbg ("swipe too short: want >= %d frames, got %d",
+                    ELAN_MIN_FRAMES, self->num_frames);
+            fpi_image_device_retry_scan (dev, FP_DEVICE_RETRY_TOO_SHORT);
+        }
+        g_clear_error (&error);
+    }
+    else
+    {
+        fpi_image_device_session_error (dev, error);
+    }
 
-	/* either max frames captured or timed out waiting for the next frame */
-	if (!ssm->error
-	    || (ssm->error == -ETIMEDOUT
-		&& ssm->cur_state == CAPTURE_WAIT_FINGER))
-		if (elandev->num_frames >= ELAN_MIN_FRAMES)
-			elan_submit_image(dev);
-		else {
-			fp_dbg("swipe too short: want >= %d frames, got %d",
-			       ELAN_MIN_FRAMES, elandev->num_frames);
-			fpi_imgdev_abort_scan(dev, FP_VERIFY_RETRY_TOO_SHORT);
-		}
-
-	/* other error
-	 * It says "...abort_scan" but reporting 1 during verification makes it
-	 * successful! */
-	else
-		fpi_imgdev_abort_scan(dev, ssm->error);
-
-	fpi_ssm_free(ssm);
 }
 
-static void elan_capture(struct fp_img_dev *dev)
+static void
+elan_capture (FpDevice *dev)
 {
-	fp_dbg("");
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
 
-	struct elan_dev *elandev = dev->priv;
+    G_DEBUG_HERE ();
 
-	elan_dev_reset(elandev);
-	struct fpi_ssm *ssm =
-	    fpi_ssm_new(dev->dev, capture_run_state, CAPTURE_NUM_STATES);
-	ssm->priv = dev;
-	fpi_ssm_start(ssm, capture_complete);
+    elan_dev_reset_state (self);
+    FpiSsm *ssm =
+        fpi_ssm_new (dev, capture_run_state, CAPTURE_NUM_STATES);
+    fpi_ssm_start (ssm, capture_complete);
+}
+
+/* this function needs to have elandev->background and elandev->last_read to be
+ * the calibration mean */
+static int
+elan_need_calibration (FpiDeviceElan *elandev)
+{
+    G_DEBUG_HERE ();
+
+    unsigned short calib_mean =
+        elandev->last_read[0] * 0xff + elandev->last_read[1];
+    unsigned int bg_mean = 0, delta;
+    unsigned int frame_size = elandev->frame_width * elandev->frame_height;
+
+    g_assert (frame_size != 0);
+
+    if (elandev->dev_type == ELAN_0C42)
+    {
+        if (calib_mean > 5500 ||
+                calib_mean < 2500)
+        {
+            fp_dbg ("Forcing needed recalibration");
+            return 1;
+        }
+    }
+
+    for (int i = 0; i < frame_size; i++)
+        bg_mean += elandev->background[i];
+    bg_mean /= frame_size;
+
+    delta =
+        bg_mean > calib_mean ? bg_mean - calib_mean : calib_mean - bg_mean;
+
+    fp_dbg ("calibration mean: %d, bg mean: %d, delta: %d", calib_mean,
+            bg_mean, delta);
+
+    return delta > ELAN_CALIBRATION_MAX_DELTA ? 1 : 0;
 }
 
 static void fpi_ssm_next_state_async(void *data)
 {
-	fpi_ssm_next_state((struct fpi_ssm *)data);
+    fpi_ssm_next_state((struct fpi_ssm *)data);
 }
 
 /* this function needs to have elandev->background and elandev->last_read to be
  * the calibration mean */
 static int elan_need_calibration(struct elan_dev *elandev)
 {
-	fp_dbg("");
+    fp_dbg("");
 
-	unsigned short calib_mean =
-	    elandev->last_read[0] * 0xff + elandev->last_read[1];
-	unsigned int bg_mean = 0, delta;
-	unsigned int frame_size = elandev->frame_width * elandev->frame_height;
+    unsigned short calib_mean =
+        elandev->last_read[0] * 0xff + elandev->last_read[1];
+    unsigned int bg_mean = 0, delta;
+    unsigned int frame_size = elandev->frame_width * elandev->frame_height;
 
-	for (int i = 0; i < frame_size; i++)
-		bg_mean += elandev->background[i];
-	bg_mean /= frame_size;
+    for (int i = 0; i < frame_size; i++)
+        bg_mean += elandev->background[i];
+    bg_mean /= frame_size;
 
-	delta =
-	    bg_mean > calib_mean ? bg_mean - calib_mean : calib_mean - bg_mean;
+    delta =
+        bg_mean > calib_mean ? bg_mean - calib_mean : calib_mean - bg_mean;
 
-	fp_dbg("calibration mean: %d, bg mean: %d, delta: %d", calib_mean,
-	       bg_mean, delta);
+    fp_dbg("calibration mean: %d, bg mean: %d, delta: %d", calib_mean,
+           bg_mean, delta);
 
-	return delta > ELAN_CALIBRATION_MAX_DELTA ? 1 : 0;
+    return delta > ELAN_CALIBRATION_MAX_DELTA ? 1 : 0;
 }
 
 enum calibrate_states {
-	CALIBRATE_GET_BACKGROUND,
-	CALIBRATE_SAVE_BACKGROUND,
-	CALIBRATE_GET_MEAN,
-	CALIBRATE_CHECK_NEEDED,
-	CALIBRATE_GET_STATUS,
-	CALIBRATE_CHECK_STATUS,
-	CALIBRATE_REPEAT_STATUS,
-	CALIBRATE_NUM_STATES,
+    CALIBRATE_GET_BACKGROUND,
+    CALIBRATE_SAVE_BACKGROUND,
+    CALIBRATE_GET_MEAN,
+    CALIBRATE_CHECK_NEEDED,
+    CALIBRATE_GET_STATUS,
+    CALIBRATE_CHECK_STATUS,
+    CALIBRATE_REPEAT_STATUS,
+    CALIBRATE_NUM_STATES,
 };
 
-static void calibrate_run_state(struct fpi_ssm *ssm)
+static gboolean
+elan_supports_calibration (FpiDeviceElan *elandev)
 {
-	struct fp_img_dev *dev = ssm->priv;
-	struct elan_dev *elandev = dev->priv;
+    if (elandev->dev_type == ELAN_0C42)
+        return TRUE;
 
-	switch (ssm->cur_state) {
-	case CALIBRATE_GET_BACKGROUND:
-		elan_run_cmd(ssm, &get_image_cmd, ELAN_CMD_TIMEOUT);
-		break;
-	case CALIBRATE_SAVE_BACKGROUND:
-		elan_save_background(elandev);
-		if (elandev->fw_ver < ELAN_MIN_CALIBRATION_FW) {
-			fp_dbg("FW does not support calibration");
-			fpi_ssm_mark_completed(ssm);
-		} else
-			fpi_ssm_next_state(ssm);
-		break;
-	case CALIBRATE_GET_MEAN:
-		elan_run_cmd(ssm, &get_calib_mean_cmd, ELAN_CMD_TIMEOUT);
-		break;
-	case CALIBRATE_CHECK_NEEDED:
-		if (elan_need_calibration(elandev)) {
-			elandev->calib_status = 0;
-			fpi_ssm_next_state(ssm);
-		} else
-			fpi_ssm_mark_completed(ssm);
-		break;
-	case CALIBRATE_GET_STATUS:
-		elandev->calib_atts_left -= 1;
-		if (elandev->calib_atts_left)
-			elan_run_cmd(ssm, &get_calib_status_cmd,
-				     ELAN_CMD_TIMEOUT);
-		else {
-			fp_dbg("calibration failed");
-			fpi_ssm_mark_aborted(ssm, -1);
-		}
-		break;
-	case CALIBRATE_CHECK_STATUS:
-		/* 0x01 - retry, 0x03 - ok
-		 * It appears that when reading the response soon after 0x4023 the device
-		 * can return 0x03, and only after some time (up to 100 ms) the response
-		 * changes to 0x01. It stays that way for some time and then changes back
-		 * to 0x03. Because of this we don't just expect 0x03, we want to see 0x01
-		 * first. This is to make sure that a full calibration loop has completed */
-		fp_dbg("calibration status: 0x%02x", elandev->last_read[0]);
-		if (elandev->calib_status == 0x01
-		    && elandev->last_read[0] == 0x03) {
-			elandev->calib_status = 0x03;
-			fpi_ssm_jump_to_state(ssm, CALIBRATE_GET_BACKGROUND);
-		} else {
-			if (elandev->calib_status == 0x00
-			    && elandev->last_read[0] == 0x01)
-				elandev->calib_status = 0x01;
-			if (!fpi_timeout_add(50, fpi_ssm_next_state_async, ssm))
-				fpi_ssm_mark_aborted(ssm, -ETIME);
-		}
-		break;
-	case CALIBRATE_REPEAT_STATUS:
-		fpi_ssm_jump_to_state(ssm, CALIBRATE_GET_STATUS);
-		break;
-	}
+    return elandev->fw_ver >= ELAN_MIN_CALIBRATION_FW;
 }
 
-static void calibrate_complete(struct fpi_ssm *ssm)
+static void
+calibrate_run_state (FpiSsm *ssm, FpDevice *dev)
 {
-	fp_dbg("");
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
 
-	struct fp_img_dev *dev = ssm->priv;
+    G_DEBUG_HERE ();
 
-	if (ssm->error != -ECANCELED)
-		elan_capture(dev);
+    switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case CALIBRATE_GET_BACKGROUND:
+        elan_run_cmd (ssm, dev, &get_image_cmd, ELAN_CMD_TIMEOUT);
+        break;
 
-	fpi_ssm_free(ssm);
+    case CALIBRATE_SAVE_BACKGROUND:
+        elan_save_background (self);
+        if (!elan_supports_calibration (self))
+        {
+            fp_dbg ("FW does not support calibration");
+            fpi_ssm_mark_completed (ssm);
+        }
+        else
+        {
+            fpi_ssm_next_state (ssm);
+        }
+        break;
+
+    case CALIBRATE_GET_MEAN:
+        elan_run_cmd (ssm, dev, &get_calib_mean_cmd, ELAN_CMD_TIMEOUT);
+        break;
+
+    case CALIBRATE_CHECK_NEEDED:
+        if (elan_need_calibration (self))
+        {
+            self->calib_status = 0;
+            fpi_ssm_next_state (ssm);
+        }
+        else
+        {
+            fpi_ssm_mark_completed (ssm);
+        }
+        break;
+
+    case CALIBRATE_GET_STATUS:
+        self->calib_atts_left -= 1;
+        if (self->calib_atts_left)
+        {
+            elan_run_cmd (ssm, dev, &get_calib_status_cmd,
+                          ELAN_CMD_TIMEOUT);
+        }
+        else
+        {
+            fp_dbg ("calibration failed");
+            fpi_ssm_mark_failed (ssm,
+                                 fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
+                                         "Callibration failed!"));
+        }
+        break;
+
+    case CALIBRATE_CHECK_STATUS:
+        /* 0x01 - retry, 0x03 - ok
+         * It appears that when reading the response soon after 0x4023 the device
+         * can return 0x03, and only after some time (up to 100 ms) the response
+         * changes to 0x01. It stays that way for some time and then changes back
+         * to 0x03. Because of this we don't just expect 0x03, we want to see 0x01
+         * first. This is to make sure that a full calibration loop has completed */
+        fp_dbg ("calibration status: 0x%02x", self->last_read[0]);
+        if (self->calib_status == 0x01 &&
+                self->last_read[0] == 0x03)
+        {
+            self->calib_status = 0x03;
+            fpi_ssm_jump_to_state (ssm, CALIBRATE_GET_BACKGROUND);
+        }
+        else
+        {
+            if (self->calib_status == 0x00 &&
+                    self->last_read[0] == 0x01)
+                self->calib_status = 0x01;
+            fpi_ssm_next_state_delayed (ssm, 50, NULL);
+        }
+        break;
+
+    case CALIBRATE_REPEAT_STATUS:
+        fpi_ssm_jump_to_state (ssm, CALIBRATE_GET_STATUS);
+        break;
+    }
 }
 
-static void elan_calibrate(struct fp_img_dev *dev)
+static void
+calibrate_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
-	fp_dbg("");
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
 
-	struct elan_dev *elandev = dev->priv;
+    G_DEBUG_HERE ();
 
-	elan_dev_reset(elandev);
-	elandev->calib_atts_left = ELAN_CALIBRATION_ATTEMPTS;
+    if (error)
+    {
+        self->dev_state = FPI_IMAGE_DEVICE_STATE_INACTIVE;
+        fpi_image_device_session_error (FP_IMAGE_DEVICE (dev), error);
+    }
+    else
+    {
+        elan_capture (dev);
+    }
 
-	struct fpi_ssm *ssm = fpi_ssm_new(dev->dev, calibrate_run_state,
-					  CALIBRATE_NUM_STATES);
-	ssm->priv = dev;
-	fpi_ssm_start(ssm, calibrate_complete);
+}
+
+static void
+elan_calibrate (FpDevice *dev)
+{
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
+
+    G_DEBUG_HERE ();
+
+    elan_dev_reset_state (self);
+    self->calib_atts_left = ELAN_CALIBRATION_ATTEMPTS;
+
+    FpiSsm *ssm = fpi_ssm_new (FP_DEVICE (dev), calibrate_run_state,
+                               CALIBRATE_NUM_STATES);
+    fpi_ssm_start (ssm, calibrate_complete);
 }
 
 enum activate_states {
-	ACTIVATE_GET_FW_VER,
-	ACTIVATE_SET_FW_VER,
-	ACTIVATE_GET_SENSOR_DIM,
-	ACTIVATE_SET_SENSOR_DIM,
-	ACTIVATE_CMD_1,
-	ACTIVATE_NUM_STATES,
+    ACTIVATE_GET_FW_VER,
+    ACTIVATE_SET_FW_VER,
+    ACTIVATE_GET_SENSOR_DIM,
+    ACTIVATE_SET_SENSOR_DIM,
+    ACTIVATE_CMD_1,
+    ACTIVATE_NUM_STATES,
 };
 
-static void activate_run_state(struct fpi_ssm *ssm)
+static void
+activate_run_state (FpiSsm *ssm, FpDevice *dev)
 {
-	struct fp_img_dev *dev = ssm->priv;
-	struct elan_dev *elandev = dev->priv;
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
 
-	switch (ssm->cur_state) {
-	case ACTIVATE_GET_FW_VER:
-		elan_run_cmd(ssm, &get_fw_ver_cmd, ELAN_CMD_TIMEOUT);
-		break;
-	case ACTIVATE_SET_FW_VER:
-		elandev->fw_ver =
-		    (elandev->last_read[0] << 8 | elandev->last_read[1]);
-		fp_dbg("FW ver 0x%04hx", elandev->fw_ver);
-		fpi_ssm_next_state(ssm);
-		break;
-	case ACTIVATE_GET_SENSOR_DIM:
-		elan_run_cmd(ssm, &get_sensor_dim_cmd, ELAN_CMD_TIMEOUT);
-		break;
-	case ACTIVATE_SET_SENSOR_DIM:
-		/* see elan_save_frame for details */
-		if (elandev->dev_type & ELAN_NOT_ROTATED) {
-			elandev->frame_width = elandev->last_read[0];
-			elandev->frame_height = elandev->raw_frame_height =
-			    elandev->last_read[2];
-		} else {
-			elandev->frame_width = elandev->last_read[2];
-			elandev->frame_height = elandev->raw_frame_height =
-			    elandev->last_read[0];
-		}
-		if (elandev->frame_height > ELAN_MAX_FRAME_HEIGHT)
-			elandev->frame_height = ELAN_MAX_FRAME_HEIGHT;
-		fp_dbg("sensor dimensions, WxH: %dx%d", elandev->frame_width,
-		       elandev->raw_frame_height);
-		fpi_ssm_next_state(ssm);
-		break;
-	case ACTIVATE_CMD_1:
-		/* TODO: find out what this does, if we need it */
-		elan_run_cmd(ssm, &activate_cmd_1, ELAN_CMD_TIMEOUT);
-		break;
-	}
+    G_DEBUG_HERE ();
+
+    switch (fpi_ssm_get_cur_state (ssm))
+    {
+    case ACTIVATE_GET_FW_VER:
+        elan_run_cmd (ssm, dev, &get_fw_ver_cmd, ELAN_CMD_TIMEOUT);
+        break;
+
+    case ACTIVATE_SET_FW_VER:
+        self->fw_ver =
+            (self->last_read[0] << 8 | self->last_read[1]);
+        fp_dbg ("FW ver 0x%04hx", self->fw_ver);
+        fpi_ssm_next_state (ssm);
+        break;
+
+    case ACTIVATE_GET_SENSOR_DIM:
+        elan_run_cmd (ssm, dev, &get_sensor_dim_cmd, ELAN_CMD_TIMEOUT);
+        break;
+
+    case ACTIVATE_SET_SENSOR_DIM:
+        /* see elan_save_frame for details */
+        if (self->dev_type & ELAN_NOT_ROTATED)
+        {
+            self->frame_width = self->last_read[0];
+            self->frame_height = self->raw_frame_height =
+                                     self->last_read[2];
+        }
+        else
+        {
+            self->frame_width = self->last_read[2];
+            self->frame_height = self->raw_frame_height =
+                                     self->last_read[0];
+        }
+        /* Work-around sensors returning the sizes as zero-based index
+         * rather than the number of pixels. */
+        if ((self->frame_width % 2 == 1) &&
+                (self->frame_height % 2 == 1))
+        {
+            self->frame_width++;
+            self->frame_height++;
+            self->raw_frame_height = self->frame_height;
+        }
+        if (self->frame_height > ELAN_MAX_FRAME_HEIGHT)
+            self->frame_height = ELAN_MAX_FRAME_HEIGHT;
+        fp_dbg ("sensor dimensions, WxH: %dx%d", self->frame_width,
+                self->raw_frame_height);
+        fpi_ssm_next_state (ssm);
+        break;
+
+    case ACTIVATE_CMD_1:
+        /* TODO: find out what this does, if we need it */
+        elan_run_cmd (ssm, dev, &activate_cmd_1, ELAN_CMD_TIMEOUT);
+        break;
+    }
 }
 
-static void activate_complete(struct fpi_ssm *ssm)
+static void
+activate_complete (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
-	fp_dbg("");
+    FpImageDevice *idev = FP_IMAGE_DEVICE (dev);
 
-	struct fp_img_dev *dev = ssm->priv;
+    G_DEBUG_HERE ();
 
-	if (ssm->error != -ECANCELED) {
-		fpi_imgdev_activate_complete(dev, ssm->error);
-	}
+    fpi_image_device_activate_complete (idev, error);
 
-	fpi_ssm_free(ssm);
 }
 
-static void elan_activate(struct fp_img_dev *dev)
+static void
+elan_activate (FpImageDevice *dev)
 {
-	fp_dbg("");
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
 
-	struct elan_dev *elandev = dev->priv;
-	elan_dev_reset(elandev);
+    G_DEBUG_HERE ();
+    elan_dev_reset_state (self);
 
-	struct fpi_ssm *ssm =
-	    fpi_ssm_new(dev->dev, activate_run_state, ACTIVATE_NUM_STATES);
-	ssm->priv = dev;
-	fpi_ssm_start(ssm, activate_complete);
+    FpiSsm *ssm =
+        fpi_ssm_new (FP_DEVICE (dev), activate_run_state,
+                     ACTIVATE_NUM_STATES);
+    fpi_ssm_start (ssm, activate_complete);
 }
 
-static int dev_init(struct fp_img_dev *dev, unsigned long driver_data)
+static void
+dev_init (FpImageDevice *dev)
 {
-	fp_dbg("");
+    GError *error = NULL;
+    FpiDeviceElan *self;
 
-	struct elan_dev *elandev;
+    G_DEBUG_HERE ();
 
-	int r = libusb_claim_interface(dev->udev, 0);
-	if (r < 0) {
-		fp_err("could not claim interface 0: %s", libusb_error_name(r));
-		return r;
-	}
+    if (!g_usb_device_claim_interface (fpi_device_get_usb_device (FP_DEVICE (dev)), 0, 0, &error))
+    {
+        fpi_image_device_open_complete (dev, error);
+        return;
+    }
 
-	dev->priv = elandev = g_malloc0(sizeof(struct elan_dev));
-	elandev->dev_type = driver_data;
-	elandev->background = NULL;
-	elandev->process_frame = elan_process_frame_thirds;
+    self = FPI_DEVICE_ELAN (dev);
 
-	switch (driver_data) {
-	case ELAN_0907:
-		elandev->process_frame = elan_process_frame_linear;
-		break;
-	}
+    /* common params */
+    self->dev_type = fpi_device_get_driver_data (FP_DEVICE (dev));
+    self->background = NULL;
+    self->process_frame = elan_process_frame_thirds;
 
-	fpi_imgdev_open_complete(dev, 0);
-	return 0;
+    switch (self->dev_type)
+    {
+    case ELAN_0907:
+        self->process_frame = elan_process_frame_linear;
+        break;
+    }
+
+    fpi_image_device_open_complete (dev, NULL);
 }
 
-static void elan_deactivate(struct fp_img_dev *dev)
+static void
+dev_deinit (FpImageDevice *dev)
 {
-	fp_dbg("");
+    GError *error = NULL;
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
 
-	fpi_imgdev_deactivate_complete(dev);
+    G_DEBUG_HERE ();
+
+    elan_dev_reset_state (self);
+    g_free (self->background);
+    g_usb_device_release_interface (fpi_device_get_usb_device (FP_DEVICE (dev)),
+                                    0, 0, &error);
+    fpi_image_device_close_complete (dev, error);
 }
 
-static void dev_deinit(struct fp_img_dev *dev)
+static void
+dev_activate (FpImageDevice *dev)
 {
-	fp_dbg("");
-
-	struct elan_dev *elandev = dev->priv;
-
-	elan_dev_reset(elandev);
-	g_free(elandev->background);
-	g_free(elandev);
-	libusb_release_interface(dev->udev, 0);
-	fpi_imgdev_close_complete(dev);
+    G_DEBUG_HERE ();
+    elan_activate (dev);
 }
 
-static int dev_activate(struct fp_img_dev *dev, enum fp_imgdev_state state)
+static void
+elan_change_state (FpImageDevice *idev)
 {
-	fp_dbg("");
-	elan_activate(dev);
-	return 0;
+    FpDevice *dev = FP_DEVICE (idev);
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
+    FpiImageDeviceState next_state = self->dev_state_next;
+
+    if (self->dev_state == next_state)
+    {
+        fp_dbg ("already in %d", next_state);
+        return;
+    }
+    else
+    {
+        fp_dbg ("changing to %d", next_state);
+    }
+
+    switch (next_state)
+    {
+    case FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON:
+        /* activation completed or another enroll stage started */
+        self->dev_state = FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON;
+        elan_calibrate (dev);
+        break;
+
+    case FPI_IMAGE_DEVICE_STATE_CAPTURE:
+        /* not used */
+        break;
+
+    case FPI_IMAGE_DEVICE_STATE_INACTIVE:
+    case FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF:
+        elan_stop_capture (dev);
+        break;
+    }
 }
 
-static void elan_change_state(struct fp_img_dev *dev)
+static void
+elan_change_state_async (FpDevice *dev,
+                         void     *data)
 {
-	struct elan_dev *elandev = dev->priv;
-	enum fp_imgdev_state next_state = elandev->dev_state_next;
-
-	if (elandev->dev_state == next_state) {
-		fp_dbg("already in %d", next_state);
-		return;
-	} else
-		fp_dbg("changing to %d", next_state);
-
-	switch (next_state) {
-	case IMGDEV_STATE_INACTIVE:
-		if (elandev->cur_transfer)
-			/* deactivation will complete in transfer callback */
-			libusb_cancel_transfer(elandev->cur_transfer);
-		else
-			elan_deactivate(dev);
-		break;
-	case IMGDEV_STATE_AWAIT_FINGER_ON:
-		/* activation completed or another enroll stage started */
-		elan_calibrate(dev);
-		break;
-	case IMGDEV_STATE_CAPTURE:
-		/* not used */
-		break;
-	case IMGDEV_STATE_AWAIT_FINGER_OFF:
-		elan_stop_capture(dev);
-	}
-
-	elandev->dev_state = next_state;
+    g_message ("state change dev: %p", dev);
+    elan_change_state (FP_IMAGE_DEVICE (dev));
 }
 
-static void elan_change_state_async(void *data)
+static void
+dev_change_state (FpImageDevice *dev, FpiImageDeviceState state)
 {
-	elan_change_state((struct fp_img_dev *)data);
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
+    GSource *timeout;
+
+    G_DEBUG_HERE ();
+
+    /* Inactive and await finger off are equivalent for the elan driver. */
+    if (state == FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF)
+        state = FPI_IMAGE_DEVICE_STATE_INACTIVE;
+
+    if (self->dev_state_next == state)
+        fp_dbg ("change to state %d already queued", state);
+
+    switch (state)
+    {
+    case FPI_IMAGE_DEVICE_STATE_INACTIVE:
+    case FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_ON:
+    case FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF: {
+        char *name;
+
+        /* schedule state change instead of calling it directly to allow all actions
+         * related to the previous state to complete */
+        self->dev_state_next = state;
+        timeout = fpi_device_add_timeout (FP_DEVICE (dev), 10,
+                                          elan_change_state_async,
+                                          NULL, NULL);
+
+        name = g_strdup_printf ("dev_change_state to %d", state);
+        g_source_set_name (timeout, name);
+        g_free (name);
+
+        break;
+    }
+
+    case FPI_IMAGE_DEVICE_STATE_CAPTURE:
+        /* TODO MAYBE: split capture ssm into smaller ssms and use this state */
+        self->dev_state = state;
+        self->dev_state_next = state;
+        break;
+
+    default:
+        g_assert_not_reached ();
+    }
 }
 
-static int dev_change_state(struct fp_img_dev *dev, enum fp_imgdev_state state)
+static void
+dev_deactivate (FpImageDevice *dev)
 {
-	fp_dbg("%d", state);
+    FpiDeviceElan *self = FPI_DEVICE_ELAN (dev);
 
-	struct elan_dev *elandev = dev->priv;
+    G_DEBUG_HERE ();
 
-	switch (state) {
-	case IMGDEV_STATE_INACTIVE:
-	case IMGDEV_STATE_AWAIT_FINGER_ON:
-	case IMGDEV_STATE_AWAIT_FINGER_OFF:
-		/* schedule state change instead of calling it directly to allow all actions
-		 * related to the previous state to complete */
-		elandev->dev_state_next = state;
-		if (!fpi_timeout_add(10, elan_change_state_async, dev)) {
-			fpi_imgdev_session_error(dev, -ETIME);
-			return -ETIME;
-		}
-		break;
-	case IMGDEV_STATE_CAPTURE:
-		/* TODO MAYBE: split capture ssm into smaller ssms and use this state */
-		elandev->dev_state = state;
-		elandev->dev_state_next = state;
-		break;
-	default:
-		fp_err("unrecognized state %d", state);
-		fpi_imgdev_session_error(dev, -EINVAL);
-		return -EINVAL;
-	}
-
-	/* as of time of writing libfprint never checks the return value */
-	return 0;
+    if (self->dev_state == FPI_IMAGE_DEVICE_STATE_INACTIVE)
+    {
+        /* The device is inactive already, complete the operation immediately. */
+        fpi_image_device_deactivate_complete (dev, NULL);
+    }
+    else
+    {
+        /* The device is not yet inactive, flag that we are deactivating (and
+         * need to signal back deactivation) and then ensure we will change
+         * to the inactive state eventually. */
+        self->deactivating = TRUE;
+        dev_change_state (dev, FPI_IMAGE_DEVICE_STATE_INACTIVE);
+    }
 }
 
-static void dev_deactivate(struct fp_img_dev *dev)
+static void
+fpi_device_elan_init (FpiDeviceElan *self)
 {
-	fp_dbg("");
-
-	dev_change_state(dev, IMGDEV_STATE_INACTIVE);
 }
+static void
+fpi_device_elan_class_init (FpiDeviceElanClass *klass)
+{
+    FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
+    FpImageDeviceClass *img_class = FP_IMAGE_DEVICE_CLASS (klass);
 
-struct fp_img_driver elan_driver = {
-	.driver = {
-		   .id = ELAN_ID,
-		   .name = FP_COMPONENT,
-		   .full_name = "ElanTech Fingerprint Sensor",
-		   .id_table = elan_id_table,
-		   .scan_type = FP_SCAN_TYPE_SWIPE,
-		   },
-	.flags = 0,
+    dev_class->id = "elan";
+    dev_class->full_name = "ElanTech Fingerprint Sensor";
+    dev_class->type = FP_DEVICE_TYPE_USB;
+    dev_class->id_table = elan_id_table;
+    dev_class->scan_type = FP_SCAN_TYPE_SWIPE;
 
-	.bz3_threshold = 24,
+    img_class->img_open = dev_init;
+    img_class->img_close = dev_deinit;
+    img_class->activate = dev_activate;
+    img_class->deactivate = dev_deactivate;
+    img_class->change_state = dev_change_state;
 
-	.open = dev_init,
-	.close = dev_deinit,
-	.activate = dev_activate,
-	.deactivate = dev_deactivate,
-	.change_state = dev_change_state,
-};
+    img_class->bz3_threshold = 24;
+}

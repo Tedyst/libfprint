@@ -1,0 +1,145 @@
+include:
+  - local: '.gitlab-ci/libfprint-templates.yaml'
+  - project: 'wayland/ci-templates'
+    ref: master
+    file: '/templates/fedora.yml'
+
+variables:
+  extends: .libfprint_common_variables
+  FEDORA_TAG: rawhide
+  FEDORA_VERSION: rawhide
+  FEDORA_IMAGE: "$CI_REGISTRY/libfprint/$CI_PROJECT_NAME/fedora/$FEDORA_VERSION:$FEDORA_TAG"
+  BUNDLE: "org.freedesktop.libfprint.Demo.flatpak"
+  LAST_ABI_BREAK: "056ea541ddc97f5806cffbd99a12dc87e4da3546"
+
+stages:
+  - check-source
+  - build
+  - test
+  - flatpack
+
+image: "$FEDORA_IMAGE"
+
+.build_one_driver_template: &build_one_driver
+  script:
+    # Build with a driver that doesn't need imaging, or nss
+    - meson --werror -Ddrivers=$driver . _build
+    - ninja -C _build
+    - rm -rf _build/
+
+.build_template: &build
+  script:
+    # And build with everything
+    - meson --werror -Ddrivers=all . _build
+    - ninja -C _build
+    - ninja -C _build install
+
+.build_template: &check_abi
+  script:
+    - ./.ci/check-abi ${LAST_ABI_BREAK} $(git rev-parse HEAD)
+
+build:
+  stage: build
+  except:
+    variables:
+      - $CI_PIPELINE_SOURCE == "schedule"
+  variables:
+    driver: virtual_image
+  <<: *build_one_driver
+  <<: *build
+#  <<: *check_abi
+
+test:
+  stage: test
+  except:
+    variables:
+      - $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - meson --werror -Ddrivers=all -Db_coverage=true . _build
+    - ninja -C _build
+    - meson test -C _build --verbose --no-stdsplit --timeout-multiplier 3
+    - ninja -C _build coverage
+  artifacts:
+    paths:
+      - _build/meson-logs
+    expire_in: 1 week
+
+test_valgrind:
+  stage: test
+  except:
+    variables:
+      - $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - meson -Ddrivers=all . _build
+    - ninja -C _build
+    - meson test -C _build --verbose --no-stdsplit --setup=valgrind
+
+test_indent:
+  stage: check-source
+  except:
+    variables:
+      - $CI_PIPELINE_SOURCE == "schedule"
+  script:
+    - scripts/uncrustify.sh --check
+
+.flatpak_script_template: &flatpak_script
+    script:
+        - flatpak-builder --stop-at=${FLATPAK_MODULE} app ${MANIFEST_PATH}
+        # Make sure to keep this in sync with the Flatpak manifest, all arguments
+        # are passed except the config-args because we build it ourselves
+        - flatpak build app meson --prefix=/app --libdir=lib ${MESON_ARGS} _build
+        - flatpak build app ninja -C _build install
+        - flatpak build app rm -rf /app/include/ /app/lib/pkgconfig/
+        - flatpak-builder --finish-only --repo=repo app ${MANIFEST_PATH}
+        # Generate a Flatpak bundle
+        - flatpak build-bundle repo ${BUNDLE} --runtime-repo=${RUNTIME_REPO} ${DBUS_ID}
+
+.flatpak_artifacts_template: &flatpak_artifacts
+    artifacts:
+        paths:
+            - ${BUNDLE}
+        when: always
+        expire_in: 30 days
+
+.flatpak_template: &flatpak
+    <<: *flatpak_script
+    <<: *flatpak_artifacts
+
+.flatpak_master_template: &flatpak_master
+    image: registry.gitlab.gnome.org/gnome/gnome-runtime-images/gnome:3.32
+    stage: flatpack
+    variables:
+        MANIFEST_PATH: "demo/org.freedesktop.libfprint.Demo.json"
+        # From demo/org.freedesktop.libfprint.Demo.json
+        MESON_ARGS: "-Dudev_rules=false -Dx11-examples=false -Dgtk-examples=true"
+        FLATPAK_MODULE: "libfprint"
+        DBUS_ID: "org.freedesktop.libfprint.Demo"
+    <<: *flatpak
+
+flatpak-auto master:
+    <<: *flatpak_master
+    when: always
+    only:
+      - tags
+      - master
+
+flatpak-manual master:
+    <<: *flatpak_master
+    when: manual
+    except:
+      refs:
+        - tags
+        - master
+      variables:
+        - $CI_PIPELINE_SOURCE == "schedule"
+
+# CONTAINERS creation stage
+container_fedora_build:
+  extends: .fedora@container-build
+  only:
+    variables:
+      - $CI_PIPELINE_SOURCE == "schedule" && $CRON_TASK == "BUILD_CI_IMAGES"
+  variables:
+    GIT_STRATEGY: none # no need to pull the whole tree for rebuilding the image
+    # a list of packages to install
+    FEDORA_RPMS: $LIBFPRINT_DEPENDENCIES
